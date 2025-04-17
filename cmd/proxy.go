@@ -5,112 +5,155 @@ import (
 	"bytes"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/Ifelsik/web-security-hw/internal"
 )
-
-type LogWriter struct {
-	prefix string
-}
-
-func (lw *LogWriter) Write(p []byte) (int, error) {
-	fmt.Printf("[%s] %s", lw.prefix, p)
-	return len(p), nil
-}
 
 const (
 	TLSConnectionEstablishStartLine = "HTTP/1.1 200 Connection established\r\n\r\n"
 )
 
 type ProxyServer struct {
+	CertStorage *internal.CertStorage
+}
+
+func NewProxyServer(certDir string) *ProxyServer {
+	server := new(ProxyServer)
+
+	server.CertStorage = internal.NewCertStorage()
+	server.CertStorage.SetCertificatesDir(certDir)
+	err := server.CertStorage.LoadCertificates(certDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return server
+}
+
+func (ps *ProxyServer) ListenAndServe(addr string) {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	listener, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Не удается принять соединение")
+			continue
+		}
+
+		go func() {
+			proxy := NewProxyConn(ps, conn)
+			proxy.ServeTCP()
+		}()
+	}
+}
+
+type ProxyConn struct {
+	ps *ProxyServer
+
 	serverConn net.Conn
 	clientConn net.Conn
 	isTLS      bool
 
-	crtToClient tls.Certificate
+	fakeCertificates *internal.CertStorage
 }
 
-func NewProxyServer(clientConn net.Conn) *ProxyServer {
-	server := new(ProxyServer)
+func NewProxyConn(ps *ProxyServer, clientConn net.Conn) *ProxyConn {
+	server := new(ProxyConn)
 
-	crtToClient, err := tls.LoadX509KeyPair("server.crt", "server.key")
-	if err != nil {
-		log.Fatal(err)
-	}
-	server.crtToClient = crtToClient
+	server.ps = ps
+	server.fakeCertificates = ps.CertStorage
+	
 	server.clientConn = clientConn
 	return server
 }
 
-func (p *ProxyServer) ServeTCP() {
+func (p *ProxyConn) ServeTCP() {
 	defer p.clientConn.Close()
 
 	var HTTPMessage bytes.Buffer
 	buffer := bufio.NewReader(io.TeeReader(p.clientConn, &HTTPMessage))
 
-	request, err := http.ReadRequest(buffer)
-	log.Printf("%+v",request)
-	if err != nil {
-		log.Printf("Невозможно прочитать запрос: %v\n", err)
-		return
-	}
+	for {
+		p.clientConn.SetDeadline(time.Now().Add(30 * time.Second))
 
-	if request.Method == http.MethodConnect { // got an HTTPS
-		err = p.establishTLS()
-	
+		request, err := http.ReadRequest(buffer)
 		if err != nil {
-			log.Printf("Проблема с установкой TLS соединения: %v\n", err)
+			if err == io.EOF {
+				log.Println("Клиент закрыл соединение")
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				log.Println("Соединение закрыто по таймауту")
+			} else {
+				log.Printf("Невозможно прочитать запрос: %v\n", err)
+			}
 			return
 		}
+
+		if request.Method == http.MethodConnect{ // got an HTTPS and serve CONNECT once
+			err = p.establishTLS()
+
+			if err != nil {
+				log.Printf("Проблема с установкой TLS соединения: %v\n", err)
+				return
+			}
+
+			HTTPMessage.Reset()
+			buffer = bufio.NewReader(io.TeeReader(p.clientConn, &HTTPMessage))
+			continue // need to read request to make reader of conn available (isn't blocked)
+		}
+
+		reqReader, err := ModifyRequest(&HTTPMessage)
+		if err != nil {
+			log.Printf("Неудалось прочитать отредактированный запрос: %v\n", err)
+			return
+		}
+
+		err = p.ConnectToServer(request.Host)
+		if err != nil {
+			log.Printf("Проблема с обработой HTTP: %v\n", err)
+			return
+		}
+
+		go io.Copy(p.serverConn, reqReader)
+		io.Copy(p.clientConn, p.serverConn)
 
 		HTTPMessage.Reset()
-		buffer = bufio.NewReader(io.TeeReader(p.clientConn, &HTTPMessage))
-		request, err = http.ReadRequest(buffer)
-		if err != nil {
-			log.Printf("Невозможно прочитать HTTPS-запрос после TLS: %v\n", err)
-			return
-		}
+		log.Println("Запрос обработан")
 	}
-	log.Printf("%+v",request)
-
-	reqReader, err := ModifyRequest(&HTTPMessage)
-	if err != nil {
-		log.Printf("Неудалось прочитать отредактированный запрос: %v\n", err)
-		return
-	}
-
-	err = p.handleHTTP(request.Host)
-	if err != nil {
-		log.Printf("Проблема с обработой HTTP: %v\n", err)
-		return
-	}
-	
-	go io.Copy(p.serverConn, reqReader)
-	io.Copy(p.clientConn, p.serverConn)
-
-
-	log.Println("Запрос обработан")
-	
-	p.serverConn.Close()
 }
 
-func (p *ProxyServer) establishTLS() error {
+func (p *ProxyConn) establishTLS() error {
 	log.Println("Установка TLS соединения с клиентом")
 	p.clientConn.Write([]byte(TLSConnectionEstablishStartLine))
 
 	conf := &tls.Config{
-		Certificates: []tls.Certificate{p.crtToClient},
 		NextProtos:   []string{"http/1.1"},
+		GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			serverName := info.ServerName
+			cert, err := p.fakeCertificates.GetOrCreateCertificate(serverName)
+			if err != nil {
+				return nil, err
+			}
+			return cert, nil
+		},
 	}
 
 	TLSConn := tls.Server(p.clientConn, conf)
 	if err := TLSConn.Handshake(); err != nil {
-		log.Println("При установке TLS соединения возникла ошибка: ", err)
+		log.Println("При установке TLS соединения с клиентом возникла ошибка: ", err)
 		return err
 	}
 
@@ -121,10 +164,14 @@ func (p *ProxyServer) establishTLS() error {
 	return nil
 }
 
-func (p *ProxyServer) handleHTTP(Host string) error {
+func (p *ProxyConn) ConnectToServer(Host string) error {
+	if p.serverConn != nil {
+		return nil
+	}
+
 	if p.isTLS {
-		log.Println("Обработка HTTPS запроса")
-		serverConn, err := tls.Dial("tcp", Host + ":443", &tls.Config{
+		log.Println("Обработка HTTPS запроса: ", Host)
+		serverConn, err := tls.Dial("tcp", Host+":443", &tls.Config{
 			InsecureSkipVerify: true,
 			NextProtos:         []string{"http/1.1"},
 		})
@@ -133,8 +180,8 @@ func (p *ProxyServer) handleHTTP(Host string) error {
 		}
 		p.serverConn = serverConn
 	} else {
-		log.Println("Обработка HTTP запроса")
-		serverConn, err := net.Dial("tcp", Host + ":80")
+		log.Println("Обработка HTTP запроса: ", Host)
+		serverConn, err := net.Dial("tcp", Host+":80")
 		if err != nil {
 			return err
 		}
@@ -148,7 +195,7 @@ func (p *ProxyServer) handleHTTP(Host string) error {
 // Deletes Proxy-Connection header
 func ModifyRequest(request io.Reader) (io.Reader, error) {
 	var buffer bytes.Buffer
-	isStartLine := false
+	isStartLine := true
 
 	scanner := bufio.NewScanner(request)
 	for scanner.Scan() {
@@ -178,9 +225,8 @@ func ModifyRequest(request io.Reader) (io.Reader, error) {
 			return nil, err
 		}
 	}
-	
+
 	buffer.WriteString("\r\n")
 
-	// log.Println(&buffer)
 	return &buffer, nil
 }
