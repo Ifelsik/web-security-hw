@@ -1,19 +1,14 @@
-package main
+package internal
 
 import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
-	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
-
-	"github.com/Ifelsik/web-security-hw/internal"
 )
 
 const (
@@ -21,13 +16,13 @@ const (
 )
 
 type ProxyServer struct {
-	CertStorage *internal.CertStorage
+	CertStorage *CertStorage
 }
 
 func NewProxyServer(certDir string) *ProxyServer {
 	server := new(ProxyServer)
 
-	server.CertStorage = internal.NewCertStorage()
+	server.CertStorage = NewCertStorage()
 	server.CertStorage.SetCertificatesDir(certDir)
 	err := server.CertStorage.LoadCertificates(certDir)
 	if err != nil {
@@ -68,7 +63,7 @@ type ProxyConn struct {
 	clientConn net.Conn
 	isTLS      bool
 
-	fakeCertificates *internal.CertStorage
+	fakeCertificates *CertStorage
 }
 
 func NewProxyConn(ps *ProxyServer, clientConn net.Conn) *ProxyConn {
@@ -76,7 +71,7 @@ func NewProxyConn(ps *ProxyServer, clientConn net.Conn) *ProxyConn {
 
 	server.ps = ps
 	server.fakeCertificates = ps.CertStorage
-	
+
 	server.clientConn = clientConn
 	return server
 }
@@ -84,11 +79,10 @@ func NewProxyConn(ps *ProxyServer, clientConn net.Conn) *ProxyConn {
 func (p *ProxyConn) ServeTCP() {
 	defer p.clientConn.Close()
 
-	var HTTPMessage bytes.Buffer
-	buffer := bufio.NewReader(io.TeeReader(p.clientConn, &HTTPMessage))
+	buffer := bufio.NewReader(p.clientConn)
 
 	for {
-		p.clientConn.SetDeadline(time.Now().Add(30 * time.Second))
+		p.clientConn.SetDeadline(time.Now().Add(60 * time.Second))
 
 		request, err := http.ReadRequest(buffer)
 		if err != nil {
@@ -102,7 +96,7 @@ func (p *ProxyConn) ServeTCP() {
 			return
 		}
 
-		if request.Method == http.MethodConnect{ // got an HTTPS and serve CONNECT once
+		if request.Method == http.MethodConnect { // got an HTTPS and serve CONNECT once
 			err = p.establishTLS()
 
 			if err != nil {
@@ -110,14 +104,17 @@ func (p *ProxyConn) ServeTCP() {
 				return
 			}
 
-			HTTPMessage.Reset()
-			buffer = bufio.NewReader(io.TeeReader(p.clientConn, &HTTPMessage))
+			// need to update buffer p.clientConn to new p.clientConn
+			// even update p.clientConn can't help to update p.clientConn in buffer
+			// we should to it explicitly
+			buffer = bufio.NewReader(p.clientConn)
+
 			continue // need to read request to make reader of conn available (isn't blocked)
 		}
 
-		reqReader, err := ModifyRequest(&HTTPMessage)
+		reqReader, err := ModifyRequest(request)
 		if err != nil {
-			log.Printf("Неудалось прочитать отредактированный запрос: %v\n", err)
+			log.Printf("Не удалось прочитать отредактированный запрос: %v\n", err)
 			return
 		}
 
@@ -127,10 +124,17 @@ func (p *ProxyConn) ServeTCP() {
 			return
 		}
 
-		go io.Copy(p.serverConn, reqReader)
-		io.Copy(p.clientConn, p.serverConn)
+		done := make(chan struct{}, 2)
+		go func() {
+			io.Copy(p.serverConn, reqReader)
+			done <- struct{}{}
+		}()
+		go func(){
+			io.Copy(p.clientConn, p.serverConn)
+			done <- struct{}{}
+		}()
+		<-done
 
-		HTTPMessage.Reset()
 		log.Println("Запрос обработан")
 	}
 }
@@ -140,7 +144,7 @@ func (p *ProxyConn) establishTLS() error {
 	p.clientConn.Write([]byte(TLSConnectionEstablishStartLine))
 
 	conf := &tls.Config{
-		NextProtos:   []string{"http/1.1"},
+		NextProtos: []string{"http/1.1"},
 		GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			serverName := info.ServerName
 			cert, err := p.fakeCertificates.GetOrCreateCertificate(serverName)
@@ -193,40 +197,17 @@ func (p *ProxyConn) ConnectToServer(Host string) error {
 
 // Returns modified request as a io.Reader.
 // Deletes Proxy-Connection header
-func ModifyRequest(request io.Reader) (io.Reader, error) {
-	var buffer bytes.Buffer
-	isStartLine := true
+func ModifyRequest(r *http.Request) (io.Reader, error) {
+	r.Header.Del("Proxy-Connection")
 
-	scanner := bufio.NewScanner(request)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if isStartLine {
-			isStartLine = false
+	// remove absolute URL
+	r.RequestURI = ""
 
-			// <METHOD> <url> HTTP/<version>
-			//    0       1        2
-			tokens := strings.Split(line, " ")
-			if len(tokens) != 3 {
-				return nil, errors.New("invalid start line")
-			}
-
-			url, err := url.Parse(tokens[1])
-			if err != nil {
-				return nil, err
-			}
-
-			line = tokens[0] + " " + url.RequestURI() + " " + tokens[2]
-		}
-		if strings.Contains(line, "Proxy-Connection") {
-			continue
-		}
-		_, err := buffer.WriteString(line + "\r\n")
-		if err != nil {
-			return nil, err
-		}
+	var buf bytes.Buffer
+	err := r.Write(&buf)
+	if err != nil {
+		return nil, err
 	}
 
-	buffer.WriteString("\r\n")
-
-	return &buffer, nil
+	return &buf, nil
 }
