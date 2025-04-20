@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/Ifelsik/web-security-hw/internal/repository"
+	"github.com/Ifelsik/web-security-hw/internal/usecase"
 )
 
 const (
@@ -16,14 +19,16 @@ const (
 )
 
 type ProxyServer struct {
-	CertStorage *CertStorage
+	CertStorage *repository.CertStorage
+	usecase     usecase.UseCase
 }
 
-func NewProxyServer(certDir string) *ProxyServer {
+func NewProxyServer(certDir string, usecase usecase.UseCase) *ProxyServer {
 	server := new(ProxyServer)
 
-	server.CertStorage = NewCertStorage()
+	server.CertStorage = repository.NewCertStorage()
 	server.CertStorage.SetCertificatesDir(certDir)
+	server.usecase = usecase
 	err := server.CertStorage.LoadCertificates(certDir)
 	if err != nil {
 		log.Fatal(err)
@@ -63,7 +68,7 @@ type ProxyConn struct {
 	clientConn net.Conn
 	isTLS      bool
 
-	fakeCertificates *CertStorage
+	fakeCertificates *repository.CertStorage
 }
 
 func NewProxyConn(ps *ProxyServer, clientConn net.Conn) *ProxyConn {
@@ -117,6 +122,8 @@ func (p *ProxyConn) ServeTCP() {
 			log.Printf("Не удалось прочитать отредактированный запрос: %v\n", err)
 			return
 		}
+
+		p.ps.usecase.SaveRequest(request)
 
 		err = p.ConnectToServer(request.Host)
 		if err != nil {

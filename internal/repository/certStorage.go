@@ -1,4 +1,4 @@
-package internal
+package repository
 
 import (
 	"crypto/tls"
@@ -61,7 +61,7 @@ func (cs *CertStorage) LoadCertificates(dir string) error {
 		return err
 	}
 
-	certFiles := make(map[string]*struct{
+	certFiles := make(map[string]*struct {
 		cert string
 		key  string
 	})
@@ -74,9 +74,9 @@ func (cs *CertStorage) LoadCertificates(dir string) error {
 			certFiles[fileBase].cert = file
 		case ".key":
 			certFiles[fileBase].key = file
-		}	
+		}
 	}
-	
+
 	for domain, files := range certFiles {
 		if files.cert != "" && files.key != "" {
 			cert, err := tls.LoadX509KeyPair(files.cert, files.key)
@@ -93,8 +93,8 @@ func (cs *CertStorage) LoadCertificates(dir string) error {
 }
 
 func GenerateCert(certDir, domain string) (string, string, error) {
-	keyFile  := certDir + "/" + domain + ".key"
-	csrFile  := certDir + "/" + domain + ".csr"
+	keyFile := certDir + "/" + domain + ".key"
+	csrFile := certDir + "/" + domain + ".csr"
 	certFile := certDir + "/" + domain + ".crt"
 	confFile := certDir + "/" + domain + ".conf"
 
@@ -136,12 +136,12 @@ DNS.2 = www.%s
 	}
 
 	// Генерация CSR
-	if err := exec.Command("openssl", "req", 
+	if err := exec.Command("openssl", "req",
 		"-new",
 		"-key", keyFile,
 		"-out", csrFile,
 		"-config", confFile,
-		).Run(); err != nil {
+	).Run(); err != nil {
 		return "", "", fmt.Errorf("ошибка генерации csr: %v", err)
 	}
 
