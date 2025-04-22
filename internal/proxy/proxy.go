@@ -1,4 +1,4 @@
-package internal
+package proxy
 
 import (
 	"bufio"
@@ -123,24 +123,32 @@ func (p *ProxyConn) ServeTCP() {
 			return
 		}
 
-		p.ps.usecase.SaveRequest(request)
-
 		err = p.ConnectToServer(request.Host)
 		if err != nil {
 			log.Printf("Проблема с обработой HTTP: %v\n", err)
 			return
 		}
 
+		var responseBuffer bytes.Buffer
 		done := make(chan struct{}, 2)
 		go func() {
 			io.Copy(p.serverConn, reqReader)
 			done <- struct{}{}
 		}()
 		go func(){
-			io.Copy(p.clientConn, p.serverConn)
+			reader := io.TeeReader(p.serverConn, &responseBuffer)
+			io.Copy(p.clientConn, reader)
 			done <- struct{}{}
 		}()
 		<-done
+		<-done
+		
+		if response, err := http.ReadResponse(bufio.NewReader(&responseBuffer), request); err == nil {
+			p.ps.usecase.SaveRequestResponse(request, response)
+			log.Println("Запрос и ответ сохранены")
+		} else {
+			log.Println("Не удалось сохранить запрос и ответ", err)
+		}
 
 		log.Println("Запрос обработан")
 	}
@@ -206,6 +214,7 @@ func (p *ProxyConn) ConnectToServer(Host string) error {
 // Deletes Proxy-Connection header
 func ModifyRequest(r *http.Request) (io.Reader, error) {
 	r.Header.Del("Proxy-Connection")
+	r.Header.Del("Accept-Encoding")
 
 	// remove absolute URL
 	r.RequestURI = ""

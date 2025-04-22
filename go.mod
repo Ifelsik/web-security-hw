@@ -2,7 +2,10 @@ module github.com/Ifelsik/web-security-hw
 
 go 1.23.0
 
-require gorm.io/gorm v1.25.12
+require (
+	github.com/joho/godotenv v1.5.1
+	gorm.io/gorm v1.25.12
+)
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -12,7 +15,6 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20231201235250-de7065d80cb9 // indirect
 	github.com/jackc/pgx/v5 v5.5.5 // indirect
 	github.com/jackc/puddle/v2 v2.2.1 // indirect
-	github.com/joho/godotenv v1.5.1 // indirect
 	golang.org/x/crypto v0.22.0 // indirect
 	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.19.0 // indirect

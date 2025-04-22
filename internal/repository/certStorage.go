@@ -68,7 +68,9 @@ func (cs *CertStorage) LoadCertificates(dir string) error {
 
 	for _, file := range files {
 		fileBase := filepath.Base(file)
-		certFiles[fileBase] = certFiles[fileBase] // интересный способ создать указатель на структуру
+		if certFiles[fileBase] == nil {
+			certFiles[fileBase] = new(struct{cert string; key string})
+		}
 		switch filepath.Ext(fileBase) {
 		case ".crt":
 			certFiles[fileBase].cert = file

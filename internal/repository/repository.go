@@ -24,24 +24,24 @@ func NewORMrepository(db *gorm.DB, log *logrus.Logger) *ORMrepository {
 	}
 }
 
-func (rep *ORMrepository) CreateRequest(ctx context.Context, request *models.Request) error {
+func (rep *ORMrepository) CreateRequest(ctx context.Context, request *models.Request) (uint, error) {
 	rep.logger.Debugf("Saving request. Got: %v", request)
 	result := rep.db.Create(request)
 
 	if result.Error != nil {
 		rep.logger.Errorf("Failed to save request: %v", result.Error)
-		return result.Error
+		return 0, result.Error
 	}
 
 	rep.logger.Debug("Request saved")
-	return nil
+	return request.ID,nil
 }
 
 func (rep *ORMrepository) GetRequestByID(ctx context.Context, id uint64) (*models.Request, error) {
 	rep.logger.Debugf("Getting request by id: %d", id)
 
 	request := new(models.Request)
-	result := rep.db.Take(request, id)
+	result := rep.db.Preload("Response").Take(request, id)
 	if result.Error != nil {
 		rep.logger.Errorf("Failed to get request: %v", result.Error)
 		return nil, result.Error
@@ -67,17 +67,17 @@ func (rep *ORMrepository) GetRequests(ctx context.Context, limit int) ([]*models
 	return requests, nil
 }
 
-func (rep *ORMrepository) CreateResponse(ctx context.Context, response *models.Response) error {
+func (rep *ORMrepository) CreateResponse(ctx context.Context, response *models.Response) (uint, error) {
 	rep.logger.Debugf("Saving response. Got: %v", response)
 	result := rep.db.Create(response)
 
 	if result.Error != nil {
 		rep.logger.Errorf("Failed to save response: %v", result.Error)
-		return result.Error
+		return 0, result.Error
 	}
 
 	rep.logger.Debug("Response saved")
-	return nil
+	return response.ID , nil
 }
 
 func ConnectPGSQL(host, user, password, dbName, port string) (*gorm.DB, error) {

@@ -25,8 +25,9 @@ type RequestHistory struct {
 }
 
 type UseCase interface {
-	ParseRequest(r *http.Request) (*models.Request, error)
 	GetRequestsHistory(ctx context.Context) ([]*RequestsListHistory, error)
-	GetRequestByID(ctx context.Context, id uint64) (*RequestHistory, error)
-	SaveRequest(r *http.Request) error
+	GetRequestByID(ctx context.Context, id uint64) (*http.Request, error)
+	SaveRequestResponse(req *http.Request, resp *http.Response) error
+	BuildRequest(*models.Request) (*http.Request, error)
+	DirBusterIterable(r *http.Request) func() *http.Request
 }

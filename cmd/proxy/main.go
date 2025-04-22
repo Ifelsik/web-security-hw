@@ -8,6 +8,7 @@ import (
 	"github.com/Ifelsik/web-security-hw/internal/delivery"
 	"github.com/Ifelsik/web-security-hw/internal/repository"
 	"github.com/Ifelsik/web-security-hw/internal/usecase"
+	"github.com/Ifelsik/web-security-hw/internal/proxy"
 	"github.com/joho/godotenv"
 )
 
@@ -36,8 +37,8 @@ func main() {
 	log.Info("Connected to database")
 
 	repo := repository.NewORMrepository(dbConn, log)
-	usecase := usecase.NewHistoryUseCase(repo, log)
-	handlers := delivery.NewHistoryHandlers(usecase, log)
+	usecase := usecase.NewHistoryUseCase(repo, log, os.Getenv("DICT_PATH"))
+	handlers := delivery.NewHistoryHandlers(usecase, log, address)
 
 	go func() {
 		r := internal.HandleRoutes(handlers)
@@ -46,7 +47,7 @@ func main() {
 		http.ListenAndServe("0.0.0.0:8000", r)
 	}()
 
-	ProxyServer := internal.NewProxyServer(certDir, usecase)
+	ProxyServer := proxy.NewProxyServer(certDir, usecase)
 
 	log.Info("Proxy server is starting on ", address)
 	ProxyServer.ListenAndServe(address)

@@ -1,14 +1,15 @@
 package models
 
 import (
-	"gorm.io/gorm"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 type Response struct {
 	gorm.Model
 	StatusCode int
-	Message string
-	Headers datatypes.JSON
-	Body string
+	RequestID  uint `gorm:"uniqueIndex; not null"`
+	Message    string
+	Headers    datatypes.JSON
+	Body       []byte
 }
