@@ -167,9 +167,11 @@ func (h *ProxyControlHandlers) Scan(w http.ResponseWriter, r *http.Request) {
 	bustedPath := make([]string, 0)
 
 	generator := h.usecase.DirBusterIterable(request)
-	h.log.Debug("Testing path")
+	h.log.Debug("Dir buster start")
+	client := http.DefaultClient
 	for req := generator(); req != nil; req = generator() {
-		resp, err := pc.SendHTTP(request)
+		h.log.Debug("trying... ", req.URL.Path)
+		resp, err := client.Do(req)
 		if err != nil {
 			h.log.Errorf("Failed to send request: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -177,6 +179,7 @@ func (h *ProxyControlHandlers) Scan(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if resp.StatusCode != http.StatusNotFound {
+			h.log.Info("Exploit: ", req.URL.Path)
 			bustedPath = append(bustedPath, req.URL.Path)
 		}
 	}

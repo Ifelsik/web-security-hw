@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Ifelsik/web-security-hw/internal/middleware"
 	"github.com/Ifelsik/web-security-hw/internal/repository"
 	"github.com/Ifelsik/web-security-hw/internal/usecase"
 )
@@ -116,6 +117,7 @@ func (p *ProxyConn) ServeTCP() {
 
 			continue // need to read request to make reader of conn available (isn't blocked)
 		}
+		request = middleware.SetTLSFlag(request, p.isTLS)
 
 		reqReader, err := ModifyRequest(request)
 		if err != nil {
@@ -135,14 +137,14 @@ func (p *ProxyConn) ServeTCP() {
 			io.Copy(p.serverConn, reqReader)
 			done <- struct{}{}
 		}()
-		go func(){
+		go func() {
 			reader := io.TeeReader(p.serverConn, &responseBuffer)
 			io.Copy(p.clientConn, reader)
 			done <- struct{}{}
 		}()
 		<-done
 		<-done
-		
+
 		if response, err := http.ReadResponse(bufio.NewReader(&responseBuffer), request); err == nil {
 			p.ps.usecase.SaveRequestResponse(request, response)
 			log.Println("Запрос и ответ сохранены")
@@ -150,7 +152,7 @@ func (p *ProxyConn) ServeTCP() {
 			log.Println("Не удалось сохранить запрос и ответ", err)
 		}
 
-		log.Println("Запрос обработан")
+		// log.Println("Запрос обработан")
 	}
 }
 

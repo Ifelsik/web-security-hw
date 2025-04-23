@@ -25,7 +25,7 @@ func NewORMrepository(db *gorm.DB, log *logrus.Logger) *ORMrepository {
 }
 
 func (rep *ORMrepository) CreateRequest(ctx context.Context, request *models.Request) (uint, error) {
-	rep.logger.Debugf("Saving request. Got: %v", request)
+	// rep.logger.Debugf("Saving request. Got: %v", request)
 	result := rep.db.Create(request)
 
 	if result.Error != nil {

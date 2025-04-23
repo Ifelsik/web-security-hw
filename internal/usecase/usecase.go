@@ -12,6 +12,7 @@ import (
 
 	"maps"
 
+	"github.com/Ifelsik/web-security-hw/internal/middleware"
 	"github.com/Ifelsik/web-security-hw/internal/models"
 	"github.com/Ifelsik/web-security-hw/internal/repository"
 	"github.com/sirupsen/logrus"
@@ -90,6 +91,7 @@ func (u *ProxyWebAPIUseCase) ParseRequest(r *http.Request) (*models.Request, err
 	requestModel := &models.Request{
 		Method:     r.Method,
 		Path:       r.URL.Path,
+		TLS:        middleware.GetTLSFlag(r),
 		GetParams:  datatypes.JSON(getParamsJson),
 		PostParams: datatypes.JSON(postParamsJson),
 		Headers:    datatypes.JSON(headersJson),
@@ -189,7 +191,14 @@ func (u *ProxyWebAPIUseCase) BuildRequest(requestParsed *models.Request) (*http.
 		body = bytes.NewReader(requestParsed.Body)
 	}
 
+	schema := "http"
+	if requestParsed.TLS {
+		schema = "https"
+	}
+	u.logger.Debugf("Schema built: %v", schema)
+
 	URL := url.URL{
+		Scheme:   schema,
 		Path:     requestParsed.Path,
 		RawQuery: query.Encode(),
 	}
@@ -218,6 +227,7 @@ func (u *ProxyWebAPIUseCase) BuildRequest(requestParsed *models.Request) (*http.
 	// Adding host
 	if hostHeader, ok := parsedHeaders["Host"]; ok && len(hostHeader) > 0 {
 		r.Host = hostHeader[0]
+		r.URL.Host = hostHeader[0]
 	}
 
 	// Adding cookies
@@ -292,9 +302,10 @@ func (u *ProxyWebAPIUseCase) DirBusterIterable(r *http.Request) func() *http.Req
 	i := 0
 	return func() *http.Request {
 		if i < len(lines) {
-			r.URL.Path = "/" + lines[i]
+			newReq := r.Clone(r.Context())
+			newReq.URL.Path = "/" + lines[i]
 			i++
-			return r
+			return newReq
 		}
 		return nil
 	}

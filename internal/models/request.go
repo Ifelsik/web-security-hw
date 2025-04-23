@@ -9,6 +9,7 @@ type Request struct {
 	gorm.Model
 	Method     string
 	Path       string
+	TLS        bool
 	GetParams  datatypes.JSON
 	PostParams datatypes.JSON
 	Headers    datatypes.JSON
