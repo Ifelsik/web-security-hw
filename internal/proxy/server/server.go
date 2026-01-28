@@ -16,7 +16,7 @@ type Server struct {
 	srv  *http.Server
 }
 
-func NewServer(c Config) *Server {
+func NewServer(c Config, router http.Handler) *Server {
 	if c.Host == "" || c.Port == 0 {
 		panic("host or port is not specified")
 	}
@@ -24,7 +24,7 @@ func NewServer(c Config) *Server {
 		conf: &c,
 		srv: &http.Server{
 			Addr:    fmt.Sprintf("%s:%d", c.Host, c.Port),
-			Handler: http.HandlerFunc(ProxyHandler),
+			Handler: router,
 		},
 	}
 }
