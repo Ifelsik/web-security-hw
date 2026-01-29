@@ -7,7 +7,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/ifelsik/mitm-proxy/internal/proxy/server"
+	"github.com/ifelsik/mitm-proxy/internal/proxy"
 	"github.com/ifelsik/mitm-proxy/internal/utills/logger"
 )
 
@@ -18,19 +18,19 @@ func main() {
 
 	log := logger.NewLogger()
 
-	router := server.NewRouter(log)
-	srvConf := server.Config{
+	router := proxy.NewRouter(log)
+	srvConf := proxy.Config{
 		Host: "0.0.0.0",
 		Port: 8080,
 	}
-	srv := server.NewServer(srvConf, router)
+	srv := proxy.NewServer(srvConf, router)
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		log.Infof("Starting server at %s", srv)
+		log.Infof("Starting proxy server at %s", srv)
 		err := srv.ListenAndServe()
 		if err != nil {
-			log.Fatalf("server: %s\n", err)
+			log.Fatalf("proxy server: %s\n", err)
 		}
 	})
 	wg.Go(func() {
@@ -38,7 +38,7 @@ func main() {
 		err := srv.Shutdown()
 		log.Info("Server is shutting down...")
 		if err != nil {
-			log.Infof("server shutdown: %s\n", err)
+			log.Infof("proxy server shutdown: %s\n", err)
 		}
 	})
 

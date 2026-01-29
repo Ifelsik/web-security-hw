@@ -1,19 +1,33 @@
-package server
+package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"runtime"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ifelsik/mitm-proxy/internal/utills/request"
 	"go.uber.org/zap"
 )
 
 func ProxyHandler(w http.ResponseWriter, r *http.Request) {
-	
+	req, err := request.ParseRawRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	clientReq, err := req.PrepareClientRequest(context.TODO())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 
-	fmt.Fprintf(w, "Got request. URL %s\n", r.URL.Path)
+	resp, err := makeClientRequest(clientReq)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	_ = resp.Write(w)
 }
 
 const stackTraceBuffSize = 1024
