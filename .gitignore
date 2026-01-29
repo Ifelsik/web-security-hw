@@ -29,3 +29,6 @@ go.work.sum
 *.crt
 *.key
 *.pem
+
+# IDE files
+.vscode/
