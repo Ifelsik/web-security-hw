@@ -7,7 +7,7 @@ import (
 	"syscall"
 
 	"github.com/ifelsik/mitm-proxy/internal/proxy"
-	"github.com/ifelsik/mitm-proxy/internal/utills/logger"
+	"github.com/ifelsik/mitm-proxy/internal/utils/logger"
 )
 
 func main() {

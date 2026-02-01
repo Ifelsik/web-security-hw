@@ -22,8 +22,6 @@ type HTTPRequest struct {
 
 	buff         bytes.Buffer // used for HTTP message metadata
 	metaPrepared bool
-	dataSize     int // payload size
-	dataRead     int // read offset
 }
 
 func ParseRawRequest(r *http.Request) (*HTTPRequest, error) {
@@ -54,22 +52,19 @@ func (hr *HTTPRequest) Read(p []byte) (int, error) {
 		}
 		hr.metaPrepared = true
 	}
-	
-	n := 0
-	if hr.buff.Len() > 0 {
-		n, err := hr.buff.Read(p)
-		if err != nil && err != io.EOF {
-			return n, fmt.Errorf("read request meta from buff: %w", err)
-		}
-		hr.dataRead += n
-		if len(p) == 0 {
-			return n, nil
-		}
+
+	n, err := hr.buff.Read(p)
+	if err != nil && err != io.EOF {
+		return n, fmt.Errorf("read meta from buff: %w", err)
 	}
+	if len(p) == n {
+		return n, nil
+	}
+
 	k, err := hr.Body.Read(p)
 	if err != nil && err != io.EOF {
 		_ = hr.Body.Close()
-		return k, fmt.Errorf("read request body: %w", err)
+		return n + k, fmt.Errorf("read request body: %w", err)
 	}
 	if err == io.EOF {
 		_ = hr.Body.Close()
@@ -84,7 +79,6 @@ func (hr *HTTPRequest) prepareMeta() error {
 		return err
 	}
 	_, _ = hr.buff.WriteString("\r\n")
-	hr.dataSize = hr.buff.Len()
 	return nil
 }
 

@@ -11,8 +11,9 @@ import (
 	"runtime"
 	"sync/atomic"
 
-	"github.com/ifelsik/mitm-proxy/internal/utills/promise"
-	"github.com/ifelsik/mitm-proxy/internal/utills/request"
+	"github.com/ifelsik/mitm-proxy/internal/utils/httputil"
+	"github.com/ifelsik/mitm-proxy/internal/utils/promise"
+	"github.com/ifelsik/mitm-proxy/internal/utils/request"
 	"go.uber.org/zap"
 )
 
@@ -121,6 +122,37 @@ func (p *Proxy) readResponse(bufRd *bufio.Reader, req *http.Request) (*http.Resp
 	return resp, nil
 }
 
+func (p *Proxy) handleTunnel(ctx context.Context, inBuffRW, outBuffRW *bufio.ReadWriter) error {
+	for {
+		req, err := p.readRequest(inBuffRW.Reader)
+		if err != nil {
+			return err
+		}
+
+		modifiedReq, err := p.modifyRequest(req)
+		if err != nil {
+			return err
+		}
+
+		_, err = io.Copy(outBuffRW.Writer, modifiedReq)
+		if err != nil {
+			return err
+		}
+
+		resp, err := http.ReadResponse(outBuffRW.Reader, req)
+		if err != nil {
+			return err
+		}
+
+		_ = resp.Write(inBuffRW)
+		err = inBuffRW.Flush()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 	defer func() {
 		err := inConn.Close()
@@ -142,7 +174,12 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 		return p.modifyRequest(req)
 	})
 
-	outConn, err := net.Dial("tcp", req.Host+":80")
+	host, err := httputil.GetHost(req)
+	if err != nil {
+		p.log.Errorf("get request host: %s", err)
+		return
+	}
+	outConn, err := net.Dial("tcp", host.String())
 	if err != nil {
 		// TODO: retry connect
 		p.log.Error("establish outbound TCP conn:", err)
@@ -174,6 +211,12 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 		p.log.Errorf("read server response: %s", err)
 		return
 	}
-	resp.Write(inBuffRW)
-	inBuffRW.Flush()
+	_ = resp.Write(inBuffRW)
+	_ = inBuffRW.Flush()
+
+	err = p.handleTunnel(ctx, inBuffRW, outBuffRW)
+	if err != nil {
+		p.log.Errorf("handle client-server tunnel: %s", err)
+		return
+	}
 }
