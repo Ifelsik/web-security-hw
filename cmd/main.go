@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/ifelsik/mitm-proxy/internal/proxy"
@@ -12,7 +13,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	stopCtx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	log := logger.NewLogger()
@@ -22,9 +23,20 @@ func main() {
 		log.Fatalf("init proxy: %s", err)
 	}
 
-	proxy.Run(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		proxy.Run()
+	})
+	wg.Go(func() {
+		<-stopCtx.Done()
+		defer cancel()
+		log.Info("Stopping server")
+		err = proxy.Shutdown(context.TODO())
+		if err != nil {
+			log.Errorf("proxy shutdown: %s", err)
+		}
+	})
 
-	<-ctx.Done()
-
+	wg.Wait()
 	log.Info("Server stopped")
 }

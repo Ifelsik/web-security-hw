@@ -3,13 +3,13 @@ package proxy
 import "sync"
 
 const (
-	bufferSize = 8 * 1024 // KB
+	bufferSize = 32 * 1024 // KB
 )
 
 var pool = &BytePool{
 	pool: sync.Pool{
 		New: func() any {
-			b := make([]byte, 0, bufferSize)
+			b := make([]byte, bufferSize)
 			return b
 		},
 	},

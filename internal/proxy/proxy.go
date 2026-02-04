@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"runtime"
 	"sync/atomic"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/ifelsik/mitm-proxy/internal/utils/httputil"
 	"github.com/ifelsik/mitm-proxy/internal/utils/promise"
 	"github.com/ifelsik/mitm-proxy/internal/utils/request"
@@ -25,6 +27,8 @@ type Proxy struct {
 	listener net.Listener
 
 	isStopped atomic.Bool
+
+	pool *BytePool
 }
 
 func NewProxy(log *zap.SugaredLogger, port string) (*Proxy, error) {
@@ -37,31 +41,34 @@ func NewProxy(log *zap.SugaredLogger, port string) (*Proxy, error) {
 		log:       log,
 		listener:  l,
 		isStopped: atomic.Bool{},
+		pool:      pool,
 	}, nil
 }
 
-func (p *Proxy) Run(ctx context.Context) {
-	go p.monitorCancel(ctx)
+func (p *Proxy) Run() {
 	p.log.Infoln("Proxy listen at", p.listener.Addr())
 	for !p.isStopped.Load() {
 		conn, err := p.listener.Accept()
 		if err != nil {
-			p.log.Errorln("accept new TCP connection:", err)
+			p.log.Errorf("accept new TCP connection: %s", err)
 			continue
 		}
-		serve := p.panicWrapper(p.serveConn)
-		go serve(ctx, conn)
+		serve := p.panicWrapper(p.loggingWrapper(p.serveConn))
+		go serve(context.TODO(), conn)
 	}
 }
 
-func (p *Proxy) monitorCancel(ctx context.Context) {
-	<-ctx.Done()
-	p.log.Info("Proxy is stopping")
+// Shutdown by default stops to accept new incoming connections.
+// All existent connections are handled till they close.
+// If ctx context timeout exceeds method throws error context.DeadlineExceeded
+func (p *Proxy) Shutdown(ctx context.Context) error {
 	p.isStopped.Store(true)
-	p.listener.Close()
+	_ = p.listener.Close()
+
+	return nil
 }
 
-const stackTraceBuffSize = 1024
+const stackTraceBuffSize = 4 * 1024
 
 func (p *Proxy) panicWrapper(next func(context.Context, net.Conn)) func(context.Context, net.Conn) {
 	defer func() {
@@ -82,6 +89,22 @@ func (p *Proxy) panicWrapper(next func(context.Context, net.Conn)) func(context.
 	return func(ctx context.Context, c net.Conn) {
 		p.log.Debug("panic recover wrapper")
 		next(ctx, c)
+	}
+}
+
+func (p *Proxy) loggingWrapper(next func(context.Context, net.Conn)) func(context.Context, net.Conn) {
+	uuid, _ := uuid.NewV7()
+	log := p.log.With(
+		"connection_id", uuid.String(),
+	)
+
+	return func(ctx context.Context, c net.Conn) {
+		log.Debug("logging wrapper")
+		start := time.Now()
+		next(ctx, c)
+		alive := time.Since(start)
+
+		log.With("alive", alive).Info("connection closed")
 	}
 }
 
@@ -134,10 +157,14 @@ func (p *Proxy) handleTunnel(ctx context.Context, inBuffRW, outBuffRW *bufio.Rea
 			return err
 		}
 
-		_, err = io.Copy(outBuffRW.Writer, modifiedReq)
+		copyBuff := p.pool.Get()
+		_, err = io.CopyBuffer(outBuffRW.Writer, modifiedReq, copyBuff)
 		if err != nil {
 			return err
 		}
+		p.pool.Put(copyBuff)
+
+		_ = outBuffRW.Flush()
 
 		resp, err := http.ReadResponse(outBuffRW.Reader, req)
 		if err != nil {
@@ -200,11 +227,15 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 		p.log.Errorf("modify request: %s", result.Err)
 	}
 
-	_, err = io.Copy(outBuffRW, result.Value)
+	copyBuf := p.pool.Get()
+	_, err = io.CopyBuffer(outBuffRW, result.Value, copyBuf)
 	if err != nil {
 		p.log.Errorf("copy request to outbound conn: %s", err)
 		return
 	}
+	p.pool.Put(copyBuf)
+
+	_ = outBuffRW.Flush()
 
 	resp, err := p.readResponse(outBuffRW.Reader, req)
 	if err != nil {

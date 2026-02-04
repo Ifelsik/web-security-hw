@@ -7,6 +7,7 @@ import (
 
 func NewLogger() *zap.SugaredLogger {
 	conf := zap.NewDevelopmentConfig()
+	conf.DisableStacktrace = true
 	conf.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	logger, _ := conf.Build()
 
