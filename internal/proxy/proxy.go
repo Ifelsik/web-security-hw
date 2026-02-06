@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,8 @@ import (
 // Address that proxy listen for.
 const listenAddress = "127.0.0.1"
 
+const clientSessionCacheSize = 100
+
 type Proxy struct {
 	log      *zap.SugaredLogger
 	listener net.Listener
@@ -29,6 +32,11 @@ type Proxy struct {
 	isStopped atomic.Bool
 
 	pool *BytePool
+
+	certCache *CertCache
+	// clientSessionCache is used to improve performance
+	// when resuming TLS session.
+	clientSessionCache tls.ClientSessionCache
 }
 
 func NewProxy(log *zap.SugaredLogger, port string) (*Proxy, error) {
@@ -37,11 +45,19 @@ func NewProxy(log *zap.SugaredLogger, port string) (*Proxy, error) {
 		return nil, fmt.Errorf("create proxy: %w", err)
 	}
 
+	certCache := NewCertCache()
+	err = certCache.Load()
+	if err != nil {
+		return nil, fmt.Errorf("create proxy: %w", err)
+	}
+
 	return &Proxy{
-		log:       log,
-		listener:  l,
-		isStopped: atomic.Bool{},
-		pool:      pool,
+		log:                log,
+		listener:           l,
+		isStopped:          atomic.Bool{},
+		pool:               pool,
+		certCache:          certCache,
+		clientSessionCache: tls.NewLRUClientSessionCache(clientSessionCacheSize),
 	}, nil
 }
 
@@ -68,25 +84,25 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-const stackTraceBuffSize = 4 * 1024
+const stackTraceBuffSize = 4 * 1024 // KB
 
 func (p *Proxy) panicWrapper(next func(context.Context, net.Conn)) func(context.Context, net.Conn) {
-	defer func() {
-		if err := recover(); err != nil {
-			p.log.Warnln("panic recovered", err)
-
-			buf := make([]byte, stackTraceBuffSize)
-
-			n := runtime.Stack(buf, false)
-			for n == len(buf) {
-				buf = make([]byte, len(buf)*2)
-				n = runtime.Stack(buf, false)
-			}
-			fmt.Printf("Stack trace: %s\n", buf[:n])
-		}
-	}()
-
 	return func(ctx context.Context, c net.Conn) {
+		defer func() {
+			if err := recover(); err != nil {
+				p.log.Warnln("panic recovered", err)
+
+				buf := make([]byte, stackTraceBuffSize)
+
+				n := runtime.Stack(buf, false)
+				for n == len(buf) {
+					buf = make([]byte, len(buf)*2)
+					n = runtime.Stack(buf, false)
+				}
+				fmt.Printf("Stack trace: %s\n", buf[:n])
+			}
+		}()
+
 		p.log.Debug("panic recover wrapper")
 		next(ctx, c)
 	}
@@ -177,7 +193,46 @@ func (p *Proxy) handleTunnel(ctx context.Context, inBuffRW, outBuffRW *bufio.Rea
 			return err
 		}
 	}
-	return nil
+}
+
+func (p *Proxy) establishTLS(inConn net.Conn, proto string, host httputil.Host) (net.Conn, net.Conn, error) {
+	_, err := fmt.Fprintf(inConn, "%s 200 Connection established\r\n\r\n", proto)
+	if err != nil {
+		return nil, nil, fmt.Errorf("confirm start of TLS establishing: %w", err)
+	}
+
+	_, err = p.certCache.GetOrCreate(host.Addr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	inTlsConn := tls.Server(inConn, &tls.Config{
+		Certificates: p.certCache.Array(),
+	})
+	err = inTlsConn.Handshake()
+	if err != nil {
+		return nil, nil, fmt.Errorf("inbound conn TLS handshake: %w", err)
+	}
+
+	outTlsConn, err := tls.Dial("tcp", host.String(), &tls.Config{
+		ClientSessionCache: p.clientSessionCache,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("TLS dial: %w", err)
+	}
+	return inTlsConn, outTlsConn, nil
+}
+
+func (p *Proxy) bufferizeConn(inConn, outConn net.Conn) (*bufio.ReadWriter, *bufio.ReadWriter) {
+	inBuff := bufio.NewReadWriter(
+		bufio.NewReader(inConn),
+		bufio.NewWriter(inConn),
+	)
+	outBuff := bufio.NewReadWriter(
+		bufio.NewReader(outConn),
+		bufio.NewWriter(outConn),
+	)
+	return inBuff, outBuff
 }
 
 func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
@@ -185,12 +240,9 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 		err := inConn.Close()
 		p.log.Debug("inbound conn closed:", err)
 	}()
-	inBuffRW := bufio.NewReadWriter(
-		bufio.NewReader(inConn),
-		bufio.NewWriter(inConn),
-	)
+	inConnReader := bufio.NewReader(inConn)
 
-	req, err := p.readRequest(inBuffRW.Reader)
+	req, err := p.readRequest(inConnReader)
 	if err != nil {
 		// TODO: may be not to return. First request can be broken due transport.
 		p.log.Error("read client request:", err)
@@ -206,44 +258,60 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 		p.log.Errorf("get request host: %s", err)
 		return
 	}
-	outConn, err := net.Dial("tcp", host.String())
-	if err != nil {
-		// TODO: retry connect
-		p.log.Error("establish outbound TCP conn:", err)
-		return
+
+	isTLS := false
+	var outConn net.Conn
+	// Any HTTPS handshake starts with CONNECT method
+	// so need to handle establish of TLS tunnel.
+	// For more info see https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods/CONNECT
+	if req.Method == http.MethodConnect {
+		var inConnTLS net.Conn
+		inConnTLS, outConn, err = p.establishTLS(inConn, req.Proto, host)
+		if err != nil {
+			p.log.Errorf("establish TLS connection: %s", err)
+			return
+		}
+		inConn = inConnTLS
+		isTLS = true
+	} else {
+		outConn, err = net.Dial("tcp", host.String())
+		if err != nil {
+			// TODO: try reconnect
+			p.log.Error("establish outbound TCP conn:", err)
+			return
+		}
 	}
 	defer func() {
 		err := outConn.Close()
 		p.log.Debug("outbound conn closed:", err)
 	}()
 
-	outBuffRW := bufio.NewReadWriter(
-		bufio.NewReader(outConn),
-		bufio.NewWriter(outConn),
-	)
+	inBuffRW, outBuffRW := p.bufferizeConn(inConn, outConn)
+	
+	if !isTLS {
+		result := <-future
+		if result.Err != nil {
+			p.log.Errorf("modify request: %s", result.Err)
+		}
 
-	result := <-future
-	if result.Err != nil {
-		p.log.Errorf("modify request: %s", result.Err)
+		copyBuf := p.pool.Get()
+		_, err = io.CopyBuffer(outBuffRW, result.Value, copyBuf)
+		if err != nil {
+			p.log.Errorf("copy request to outbound conn: %s", err)
+			return
+		}
+		p.pool.Put(copyBuf)
+
+		_ = outBuffRW.Flush()
+
+		resp, err := p.readResponse(outBuffRW.Reader, req)
+		if err != nil {
+			p.log.Errorf("read server response: %s", err)
+			return
+		}
+		_ = resp.Write(inBuffRW)
+		_ = inBuffRW.Flush()
 	}
-
-	copyBuf := p.pool.Get()
-	_, err = io.CopyBuffer(outBuffRW, result.Value, copyBuf)
-	if err != nil {
-		p.log.Errorf("copy request to outbound conn: %s", err)
-		return
-	}
-	p.pool.Put(copyBuf)
-
-	_ = outBuffRW.Flush()
-
-	resp, err := p.readResponse(outBuffRW.Reader, req)
-	if err != nil {
-		p.log.Errorf("read server response: %s", err)
-		return
-	}
-	_ = resp.Write(inBuffRW)
-	_ = inBuffRW.Flush()
 
 	err = p.handleTunnel(ctx, inBuffRW, outBuffRW)
 	if err != nil {
