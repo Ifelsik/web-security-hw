@@ -61,7 +61,9 @@ func (hr *HTTPRequest) Read(p []byte) (int, error) {
 		return n, nil
 	}
 
-	k, err := hr.Body.Read(p)
+	// Slice operator probably may reduce performance.
+	// TODO: think about another implementation of Read.
+	k, err := hr.Body.Read(p[n:])
 	if err != nil && err != io.EOF {
 		_ = hr.Body.Close()
 		return n + k, fmt.Errorf("read request body: %w", err)
