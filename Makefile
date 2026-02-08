@@ -1,13 +1,15 @@
-.PHONY: ca-gen pk-gen
+EXECUTABLE=mitm-proxy
+
 CA_NAME=ifelser-mitm-ca
-EXECUTABLE=main
 CERTS_DIR=./certs
+
+.PHONY: ca-gen pk-gen
 
 all: ca-gen pk-gen build
 
 build:
 	@echo "build app"
-	go build -o $(EXECUTABLE) ./cmd
+	go build -o $(EXECUTABLE) ./cmd/main.go
 
 ca-gen:
 	@echo "generate ca cert"
