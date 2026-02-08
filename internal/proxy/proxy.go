@@ -14,14 +14,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ifelsik/mitm-proxy/internal/config"
 	"github.com/ifelsik/mitm-proxy/internal/utils/httputil"
 	"github.com/ifelsik/mitm-proxy/internal/utils/promise"
 	"github.com/ifelsik/mitm-proxy/internal/utils/request"
 	"go.uber.org/zap"
 )
-
-// Address that proxy listen for.
-const listenAddress = "127.0.0.1"
 
 const clientSessionCacheSize = 100
 
@@ -33,20 +31,20 @@ type Proxy struct {
 
 	pool *BytePool
 
-	certCache *CertCache
+	certProvider *CertProvider
 	// clientSessionCache is used to improve performance
 	// when resuming TLS session.
 	clientSessionCache tls.ClientSessionCache
 }
 
-func NewProxy(log *zap.SugaredLogger, port string) (*Proxy, error) {
-	l, err := net.Listen("tcp", fmt.Sprintf("%s:%s", listenAddress, port))
+func NewProxy(conf config.Proxy, log *zap.SugaredLogger) (*Proxy, error) {
+	l, err := net.Listen("tcp", fmt.Sprintf("%s:%s", conf.Address, conf.Port))
 	if err != nil {
 		return nil, fmt.Errorf("create proxy: %w", err)
 	}
 
-	certCache := NewCertCache()
-	err = certCache.Load()
+	certProvider := NewCertProvider(conf.TLS)
+	err = certProvider.Load()
 	if err != nil {
 		return nil, fmt.Errorf("create proxy: %w", err)
 	}
@@ -56,7 +54,7 @@ func NewProxy(log *zap.SugaredLogger, port string) (*Proxy, error) {
 		listener:           l,
 		isStopped:          atomic.Bool{},
 		pool:               pool,
-		certCache:          certCache,
+		certProvider:       certProvider,
 		clientSessionCache: tls.NewLRUClientSessionCache(clientSessionCacheSize),
 	}, nil
 }
@@ -168,13 +166,13 @@ func (p *Proxy) establishTLS(inConn net.Conn, proto string, host httputil.Host) 
 		return nil, nil, fmt.Errorf("confirm start of TLS establishing: %w", err)
 	}
 
-	_, err = p.certCache.GetOrCreate(host.Addr)
+	err = p.certProvider.GenerateIfNotExist(host.Addr)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	inTlsConn := tls.Server(inConn, &tls.Config{
-		Certificates: p.certCache.Array(),
+		Certificates: p.certProvider.Certificates(),
 	})
 	err = inTlsConn.Handshake()
 	if err != nil {
