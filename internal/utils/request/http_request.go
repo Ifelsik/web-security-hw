@@ -14,6 +14,7 @@ var ErrMetaIsBad = errors.New("unable to form HTTP message metadata")
 
 type HTTPRequest struct {
 	Host    Host // authority according RFC3986
+	Proto   string
 	Method  string
 	Path    string // path+query+fragment according RFC3986 (see section 3)
 	Headers http.Header
@@ -31,6 +32,7 @@ func ParseRawRequest(r *http.Request) (*HTTPRequest, error) {
 
 	result := &HTTPRequest{
 		Host:         NewHost(r.Host),
+		Proto:        r.Proto,
 		Method:       r.Method,
 		Path:         r.URL.RequestURI() + r.URL.Fragment,
 		Headers:      r.Header,
@@ -61,8 +63,6 @@ func (hr *HTTPRequest) Read(p []byte) (int, error) {
 		return n, nil
 	}
 
-	// Slice operator probably may reduce performance.
-	// TODO: think about another implementation of Read.
 	k, err := hr.Body.Read(p[n:])
 	if err != nil && err != io.EOF {
 		_ = hr.Body.Close()
@@ -75,7 +75,7 @@ func (hr *HTTPRequest) Read(p []byte) (int, error) {
 }
 
 func (hr *HTTPRequest) prepareMeta() error {
-	_, _ = fmt.Fprintf(&hr.buff, "%s %s HTTP/1.1\r\nHost: %s\r\n", hr.Method, hr.Path, hr.Host.String())
+	_, _ = fmt.Fprintf(&hr.buff, "%s %s %s\r\nHost: %s\r\n", hr.Method, hr.Path, hr.Proto, hr.Host.String())
 	err := hr.Headers.Write(&hr.buff)
 	if err != nil {
 		return err

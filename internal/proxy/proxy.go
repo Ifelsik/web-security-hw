@@ -65,7 +65,7 @@ func (p *Proxy) Run() {
 	p.log.Infoln("Proxy listen at", p.listener.Addr())
 	for !p.isStopped.Load() {
 		conn, err := p.listener.Accept()
-		if err != nil {
+		if err != nil && !p.isStopped.Load() {
 			p.log.Errorf("accept new TCP connection: %s", err)
 			continue
 		}
@@ -116,6 +116,7 @@ func (p *Proxy) loggingWrapper(next func(context.Context, net.Conn)) func(contex
 
 	return func(ctx context.Context, c net.Conn) {
 		log.Debug("logging wrapper")
+		ctx = NewContext(ctx, log)
 		start := time.Now()
 		next(ctx, c)
 		alive := time.Since(start)
@@ -161,40 +162,6 @@ func (p *Proxy) readResponse(bufRd *bufio.Reader, req *http.Request) (*http.Resp
 	return resp, nil
 }
 
-func (p *Proxy) handleTunnel(ctx context.Context, inBuffRW, outBuffRW *bufio.ReadWriter) error {
-	for {
-		req, err := p.readRequest(inBuffRW.Reader)
-		if err != nil {
-			return err
-		}
-
-		modifiedReq, err := p.modifyRequest(req)
-		if err != nil {
-			return err
-		}
-
-		copyBuff := p.pool.Get()
-		_, err = io.CopyBuffer(outBuffRW.Writer, modifiedReq, copyBuff)
-		if err != nil {
-			return err
-		}
-		p.pool.Put(copyBuff)
-
-		_ = outBuffRW.Flush()
-
-		resp, err := http.ReadResponse(outBuffRW.Reader, req)
-		if err != nil {
-			return err
-		}
-
-		_ = resp.Write(inBuffRW)
-		err = inBuffRW.Flush()
-		if err != nil {
-			return err
-		}
-	}
-}
-
 func (p *Proxy) establishTLS(inConn net.Conn, proto string, host httputil.Host) (net.Conn, net.Conn, error) {
 	_, err := fmt.Fprintf(inConn, "%s 200 Connection established\r\n\r\n", proto)
 	if err != nil {
@@ -235,17 +202,61 @@ func (p *Proxy) bufferizeConn(inConn, outConn net.Conn) (*bufio.ReadWriter, *buf
 	return inBuff, outBuff
 }
 
+func (p *Proxy) handleTunnel(ctx context.Context, inBuffRW, outBuffRW *bufio.ReadWriter) error {
+	log, ok := FromContext(ctx)
+	if !ok {
+		log = p.log
+	}
+
+	for {
+		req, err := p.readRequest(inBuffRW.Reader)
+		if err != nil {
+			return err
+		}
+
+		modifiedReq, err := p.modifyRequest(req)
+		if err != nil {
+			return err
+		}
+
+		copyBuff := p.pool.Get()
+		_, err = io.CopyBuffer(outBuffRW.Writer, modifiedReq, copyBuff)
+		if err != nil {
+			return err
+		}
+		p.pool.Put(copyBuff)
+
+		_ = outBuffRW.Flush()
+
+		resp, err := http.ReadResponse(outBuffRW.Reader, req)
+		if err != nil {
+			return err
+		}
+		log.With("host", resp.Request.Host, "path", resp.Request.URL, "status", resp.Status).Info("server responded")
+
+		_ = resp.Write(inBuffRW)
+		err = inBuffRW.Flush()
+		if err != nil {
+			return err
+		}
+	}
+}
+
 func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
+	log, ok := FromContext(ctx)
+	if !ok {
+		log = p.log
+	}
 	defer func() {
 		err := inConn.Close()
-		p.log.Debug("inbound conn closed:", err)
+		log.Debug("inbound conn closed:", err)
 	}()
 	inConnReader := bufio.NewReader(inConn)
 
 	req, err := p.readRequest(inConnReader)
 	if err != nil {
 		// TODO: may be not to return. First request can be broken due transport.
-		p.log.Error("read client request:", err)
+		log.Error("read client request:", err)
 		return
 	}
 
@@ -255,7 +266,7 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 
 	host, err := httputil.GetHost(req)
 	if err != nil {
-		p.log.Errorf("get request host: %s", err)
+		log.Errorf("get request host: %s", err)
 		return
 	}
 
@@ -268,7 +279,7 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 		var inConnTLS net.Conn
 		inConnTLS, outConn, err = p.establishTLS(inConn, req.Proto, host)
 		if err != nil {
-			p.log.Errorf("establish TLS connection: %s", err)
+			log.Errorf("establish TLS connection: %s", err)
 			return
 		}
 		inConn = inConnTLS
@@ -277,27 +288,28 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 		outConn, err = net.Dial("tcp", host.String())
 		if err != nil {
 			// TODO: try reconnect
-			p.log.Error("establish outbound TCP conn:", err)
+			log.Error("establish outbound TCP conn:", err)
 			return
 		}
 	}
 	defer func() {
 		err := outConn.Close()
-		p.log.Debug("outbound conn closed:", err)
+		log.Debug("outbound conn closed:", err)
 	}()
 
 	inBuffRW, outBuffRW := p.bufferizeConn(inConn, outConn)
-	
+
+	// Need to end exchange of HTTP message if got HTTP request.
 	if !isTLS {
 		result := <-future
 		if result.Err != nil {
-			p.log.Errorf("modify request: %s", result.Err)
+			log.Errorf("modify request: %s", result.Err)
 		}
 
 		copyBuf := p.pool.Get()
 		_, err = io.CopyBuffer(outBuffRW, result.Value, copyBuf)
 		if err != nil {
-			p.log.Errorf("copy request to outbound conn: %s", err)
+			log.Errorf("copy request to outbound conn: %s", err)
 			return
 		}
 		p.pool.Put(copyBuf)
@@ -306,16 +318,17 @@ func (p *Proxy) serveConn(ctx context.Context, inConn net.Conn) {
 
 		resp, err := p.readResponse(outBuffRW.Reader, req)
 		if err != nil {
-			p.log.Errorf("read server response: %s", err)
+			log.Errorf("read server response: %s", err)
 			return
 		}
+		log.With("host", resp.Request.Host, "path", resp.Request.URL, "status", resp.Status).Info("server responded")
 		_ = resp.Write(inBuffRW)
 		_ = inBuffRW.Flush()
 	}
 
 	err = p.handleTunnel(ctx, inBuffRW, outBuffRW)
 	if err != nil {
-		p.log.Errorf("handle client-server tunnel: %s", err)
+		log.Errorf("handle client-server tunnel: %s", err)
 		return
 	}
 }
