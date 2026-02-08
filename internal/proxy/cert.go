@@ -5,26 +5,100 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/ifelsik/mitm-proxy/internal/config"
 	"github.com/ifelsik/mitm-proxy/internal/utils/fileutil"
 )
 
-const (
-	caCertPath        = "../certs/ifelser-mitm-ca.crt"
-	caKeyPath         = "../certs/ifelser-mitm-ca.key"
-	certGeneratorPath = "../scripts/gen_cert.sh"
-	certPathDir       = "../certs"
-	certPrivateKey    = certPathDir + "/" + "cert.key"
-)
+type CertProvider struct {
+	conf  config.TLS
+	cache *CertCache
+	cg    *CertGenerator
+}
 
-func generateCertTLS(domain string) (string, error) {
+func NewCertProvider(conf config.TLS) *CertProvider {
+	return &CertProvider{
+		conf:  conf,
+		cache: NewCertCache(),
+		cg: &CertGenerator{
+			conf: conf,
+		},
+	}
+}
+
+func (cp *CertProvider) LoadFile(certPath, keyPath string) error {
+	crt, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return fmt.Errorf("load certificate: %w", err)
+	}
+	domain := fileutil.Filename(certPath)
+	cp.cache.Put(domain, &crt)
+	return nil
+}
+
+func (cp *CertProvider) Load() error {
+	files, err := fileutil.ListFiles(cp.conf.CertsDir)
+	if err != nil {
+		return fmt.Errorf("load certificates: %w", err)
+	}
+
+	for _, certFile := range files {
+		certFile = filepath.Join(cp.conf.CertsDir, certFile)
+		// That comparison looks shitty but caused by certs store.
+		// Change requires refactor project structure or .sh scripts.
+		if certFile == cp.conf.CACert ||
+			certFile == cp.conf.CAKey ||
+			certFile == cp.conf.CertKey {
+			continue
+		}
+		_ = cp.LoadFile(certFile, cp.conf.CertKey)
+	}
+	return nil
+}
+
+func (cp *CertProvider) GenerateIfNotExist(sni string) error {
+	_, ok := cp.cache.Get(sni)
+	if ok {
+		return nil
+	}
+
+	certPath, err := cp.cg.CertGenerate(sni)
+	if err != nil {
+		return fmt.Errorf("certificate provider: %w", err)
+	}
+
+	err = cp.LoadFile(certPath, cp.conf.CertKey)
+	if err != nil {
+		return fmt.Errorf("certificate provider: %w", err)
+	}
+	return nil
+}
+
+func (cp *CertProvider) Certificates() []tls.Certificate {
+	return cp.cache.Array()
+}
+
+type CertGenerator struct {
+	conf config.TLS
+}
+
+func (cg *CertGenerator) CertGenerate(domain string) (string, error) {
 	id, _ := uuid.NewV7()
 	serialNumber := "0x" + hex.EncodeToString(id[:])
-	certPath := certPathDir + "/" + domain
+	certPath := filepath.Join(cg.conf.CertsDir, domain)
 
-	cmd := exec.Command(certGeneratorPath, caCertPath, caKeyPath, certPath, domain, serialNumber, certPrivateKey)
+	cmd := exec.Command(
+		cg.conf.CertScript,
+		cg.conf.CACert,
+		cg.conf.CAKey,
+		certPath,
+		domain,
+		serialNumber,
+		cg.conf.CertKey,
+	)
 	err := cmd.Run()
 	if err != nil {
 		return "", fmt.Errorf("generate certificate: %w", err)
@@ -32,13 +106,9 @@ func generateCertTLS(domain string) (string, error) {
 	return certPath + ".crt", nil
 }
 
-func loadCertificate(domain string) (tls.Certificate, error) {
-	certPath := certPathDir + "/" + domain
-	return tls.LoadX509KeyPair(certPath, certPrivateKey)
-}
-
 type CertCache struct {
 	certs map[string]*tls.Certificate
+	cg    CertGenerator
 
 	mu *sync.RWMutex
 }
@@ -48,26 +118,6 @@ func NewCertCache() *CertCache {
 		certs: make(map[string]*tls.Certificate),
 		mu:    &sync.RWMutex{},
 	}
-}
-
-func (c *CertCache) GetOrCreate(sni string) (*tls.Certificate, error) {
-	cert, ok := c.Get(sni)
-	if ok {
-		return cert, nil
-	}
-
-	certPath, err := generateCertTLS(sni)
-	if err != nil {
-		return nil, err
-	}
-
-	err = c.LoadFile(certPath, certPrivateKey)
-	if err != nil {
-		return nil, err
-	}
-
-	cert, _ = c.Get(sni)
-	return cert, nil
 }
 
 func (c *CertCache) Get(sni string) (*tls.Certificate, bool) {
@@ -84,36 +134,6 @@ func (c *CertCache) Put(domain string, cert *tls.Certificate) {
 	c.mu.Lock()
 	c.certs[domain] = cert
 	c.mu.Unlock()
-}
-
-func (c *CertCache) Load() error {
-	files, err := fileutil.ListFiles(certPathDir)
-	if err != nil {
-		return fmt.Errorf("load certificates: %w", err)
-	}
-
-	for _, certFile := range files {
-		certFile = certPathDir + "/" + certFile
-		// That comparison looks shitty but caused by certs store.
-		// Change requires refactor project structure or .sh scripts.
-		if certFile == caCertPath ||
-			certFile == caKeyPath ||
-			certFile == certPrivateKey {
-			continue
-		}
-		c.LoadFile(certFile, certPrivateKey)
-	}
-	return nil
-}
-
-func (c *CertCache) LoadFile(cert, key string) error {
-	crt, err := tls.LoadX509KeyPair(cert, key)
-	if err != nil {
-		return fmt.Errorf("load certificate: %w", err)
-	}
-	domain := fileutil.Filename(cert)
-	c.Put(domain, &crt)
-	return nil
 }
 
 func (c *CertCache) Array() []tls.Certificate {

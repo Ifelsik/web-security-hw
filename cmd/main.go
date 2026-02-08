@@ -7,9 +7,12 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/ifelsik/mitm-proxy/internal/config"
 	"github.com/ifelsik/mitm-proxy/internal/proxy"
 	"github.com/ifelsik/mitm-proxy/internal/utils/logger"
 )
+
+const configPath = "/home/misha_che/projects/web-security-hw/config.yaml"
 
 func main() {
 	ctx := context.Background()
@@ -18,7 +21,12 @@ func main() {
 
 	log := logger.NewLogger()
 
-	proxy, err := proxy.NewProxy(log, "8080")
+	conf, err := config.Parse(configPath)
+	if err != nil {
+		log.Fatalf("read config: %s", err)
+	}
+
+	proxy, err := proxy.NewProxy(conf.Proxy, log)
 	if err != nil {
 		log.Fatalf("init proxy: %s", err)
 	}

@@ -1,13 +1,23 @@
-FROM golang:1.24
+FROM golang:1.25 AS build
 
 WORKDIR /build
 
-COPY go.mod ./
-RUN go mod download
+COPY go.mod go.sum ./
+
+RUN go mod download && go mod verify
 
 COPY . .
 
-RUN go build -o main ./cmd/proxy
-CMD ["./main"]
+RUN CGO_ENABLED=0 GOOS=linux go build -o mitm-proxy ./cmd/main.go
+
+FROM alpine:3.22
+
+WORKDIR /app
+
+COPY --from=build /build/mitm-proxy ./cmd/
+
+COPY --from=build /build/certs ./certs/
+
+ENTRYPOINT ["./cmd/mitm-proxy"]
 
 EXPOSE 8080 8000
